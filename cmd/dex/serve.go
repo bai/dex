@@ -21,6 +21,7 @@ import (
 	grpcprometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/oklog/run"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -101,12 +102,12 @@ func runServe(options serveOptions) error {
 	logger.Infof("config issuer: %s", c.Issuer)
 
 	prometheusRegistry := prometheus.NewRegistry()
-	err = prometheusRegistry.Register(prometheus.NewGoCollector())
+	err = prometheusRegistry.Register(collectors.NewGoCollector())
 	if err != nil {
 		return fmt.Errorf("failed to register Go runtime metrics: %v", err)
 	}
 
-	err = prometheusRegistry.Register(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+	err = prometheusRegistry.Register(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	if err != nil {
 		return fmt.Errorf("failed to register process metrics: %v", err)
 	}
@@ -304,6 +305,18 @@ func runServe(options serveOptions) error {
 		logger.Infof("config device requests valid for: %v", deviceRequests)
 		serverConfig.DeviceRequestsValidFor = deviceRequests
 	}
+	refreshTokenPolicy, err := server.NewRefreshTokenPolicy(
+		logger,
+		c.Expiry.RefreshTokens.DisableRotation,
+		c.Expiry.RefreshTokens.ValidIfNotUsedFor,
+		c.Expiry.RefreshTokens.AbsoluteLifetime,
+		c.Expiry.RefreshTokens.ReuseInterval,
+	)
+	if err != nil {
+		return fmt.Errorf("invalid refresh token expiration policy config: %v", err)
+	}
+
+	serverConfig.RefreshTokenPolicy = refreshTokenPolicy
 	serv, err := server.NewServer(context.Background(), serverConfig)
 	if err != nil {
 		return fmt.Errorf("failed to initialize server: %v", err)
@@ -324,14 +337,14 @@ func runServe(options serveOptions) error {
 		telemetryRouter.Handle("/healthz/ready", handler)
 	}
 
-	healthChecker.RegisterCheck(&gosundheit.Config{
-		Check: &checks.CustomCheck{
+	healthChecker.RegisterCheck(
+		&checks.CustomCheck{
 			CheckName: "storage",
 			CheckFunc: storage.NewCustomHealthCheckFunc(serverConfig.Storage, serverConfig.Now),
 		},
-		ExecutionPeriod:  15 * time.Second,
-		InitiallyPassing: true,
-	})
+		gosundheit.ExecutionPeriod(15*time.Second),
+		gosundheit.InitiallyPassing(true),
+	)
 
 	var group run.Group
 
@@ -437,7 +450,7 @@ func runServe(options serveOptions) error {
 		}
 
 		grpcSrv := grpc.NewServer(grpcOptions...)
-		api.RegisterDexServer(grpcSrv, server.NewAPI(serverConfig.Storage, logger))
+		api.RegisterDexServer(grpcSrv, server.NewAPI(serverConfig.Storage, logger, version))
 
 		grpcMetrics.InitializeMetrics(grpcSrv)
 		if c.GRPC.Reflection {
